@@ -91,14 +91,14 @@ button{font:inherit}
   animation:pol-in .85s cubic-bezier(.2,.9,.25,1) .12s both}
 @keyframes pol-in{from{opacity:0;transform:translateY(7%) scale(.9) rotate(2.5deg)}to{opacity:1;transform:none}}
 .photo{position:relative;overflow:hidden;width:var(--pw);height:var(--ph);background:#aeb8b2}
-.photo img{display:block;width:100%;height:100%;object-fit:cover}
+.photo img,.photo canvas{display:block;width:100%;height:100%;object-fit:cover}
 .photo::after{content:"";position:absolute;inset:0;pointer-events:none;
   box-shadow:inset 0 0 0 1px rgba(0,0,0,.12),inset 0 calc(var(--u)*.008) calc(var(--u)*.03) rgba(0,0,0,.28)}
 .veil{position:absolute;inset:0;opacity:0;pointer-events:none;background:linear-gradient(160deg,#cdd4cc,#a9b4af)}
 .polaroid figcaption{height:calc(var(--u)*.24);display:grid;place-items:center;overflow:hidden;white-space:nowrap;
   font-family:"Caveat",cursive;font-weight:700;font-size:var(--fs);color:#2b3a34;transform:rotate(-1.2deg)}
 /* fremkaldelsen */
-.polaroid.dev img{animation:dev-img 4.2s cubic-bezier(.3,0,.2,1) .25s both}
+.polaroid.dev img,.polaroid.dev canvas{animation:dev-img 4.2s cubic-bezier(.3,0,.2,1) .25s both}
 .polaroid.dev .veil{animation:dev-veil 3.5s cubic-bezier(.4,0,.3,1) .25s both}
 @keyframes dev-veil{0%,10%{opacity:1}100%{opacity:0}}
 @keyframes dev-img{
@@ -109,7 +109,7 @@ button{font:inherit}
 
 /* ---------- gennemsyn ---------- */
 #review{display:grid;grid-template-columns:1fr auto;background:var(--pine-deep);overflow:hidden}
-#revBg{position:absolute;inset:-12%;background-size:cover;background-position:center;
+#revBg{position:absolute;left:-12%;top:-12%;width:124%;height:124%;
   filter:blur(42px) saturate(1.25) brightness(.42)}
 #review::after{content:"";position:absolute;inset:0;pointer-events:none;
   background:radial-gradient(90% 90% at 40% 45%,rgba(8,28,21,0) 30%,rgba(8,28,21,.75) 100%)}
@@ -158,6 +158,9 @@ h2{margin:0;font-weight:400;line-height:1.05;font-size:clamp(26px,7vmin,48px)}
   transition:transform .35s cubic-bezier(.2,.9,.3,1.2),opacity .2s ease}
 #toast.on{transform:translate(-50%,0);opacity:1}
 #toast svg{width:1.1em;height:1.1em}
+#toast.bad svg{display:none}
+#ver{position:absolute;right:calc(10px + env(safe-area-inset-right));bottom:calc(8px + env(safe-area-inset-bottom));
+  font:12px system-ui,sans-serif;color:rgba(255,255,255,.38)}
 
 /* ---------- indstillinger ---------- */
 #menu{position:fixed;inset:0;display:none;place-items:center;padding:14px;background:rgba(4,14,10,.72);
@@ -215,7 +218,7 @@ input:focus-visible,.mb:focus-visible,.seg button:focus-visible{outline:3px soli
 <div id="count" class="layer"><div id="say"></div></div>
 
 <div id="review" class="layer">
-  <div id="revBg"></div>
+  <canvas id="revBg" width="48" height="27"></canvas>
   <div id="stage">
     <button id="prev" class="nav" aria-label="Forrige billede" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
     <button id="next" class="nav" aria-label="Næste billede" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg></button>
@@ -246,8 +249,8 @@ input:focus-visible,.mb:focus-visible,.seg button:focus-visible{outline:3px soli
     <h1>Photobooth</h1>
     <p class="hand" id="startCaption"></p>
     <button id="btnStart" class="btn red">Start kameraet</button>
-    <p class="fine">Telefonen spørger om lov til at bruge kameraet. Svar ja.<br>Indstillinger: hold en finger i øverste venstre hjørne.</p>
   </div>
+  <span id="ver"></span>
 </div>
 
 <div id="error" class="layer">
@@ -284,7 +287,7 @@ input:focus-visible,.mb:focus-visible,.seg button:focus-visible{outline:3px soli
 <script>
 (() => {
 'use strict';
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const IDLE_MS = 30000;      // stilstand før diasshowet starter
 const REVIEW_MS = 60000;    // et billede, ingen har taget stilling til, kasseres
 const SLIDE_MS = 6000;
@@ -436,14 +439,39 @@ async function boot(demo) {
     setState('error');
   }
 }
-function capture() {
+/* JPEG-pakningen sker på sin egen tråd, så blinket aldrig venter på den.
+   (canvas.toBlob venter på ledig tid i browseren, og den er der næsten ingen af, mens kameraet kører.) */
+const encode = (() => {
+  let worker = null, seq = 0;
+  const jobs = new Map();
+  try {
+    if (window.Worker && window.OffscreenCanvas && window.createImageBitmap) {
+      const src = "onmessage=async e=>{const{id,bmp}=e.data;try{const c=new OffscreenCanvas(bmp.width,bmp.height);c.getContext('2d').drawImage(bmp,0,0);bmp.close();postMessage({id,blob:await c.convertToBlob({type:'image/jpeg',quality:.92})})}catch(err){postMessage({id,error:String(err)})}}";
+      worker = new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})));
+      worker.onmessage = e => { const j = jobs.get(e.data.id); if (!j) return; jobs.delete(e.data.id); e.data.blob ? j.res(e.data.blob) : j.rej(new Error(e.data.error)); };
+      worker.onerror = () => { worker = null; jobs.forEach(j => j.rej(new Error('worker'))); jobs.clear(); };
+    }
+  } catch (e) { worker = null; }
+  const onMain = c => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('toBlob')), 'image/jpeg', .92));
+  const inWorker = c => createImageBitmap(c).then(bmp => new Promise((res, rej) => {
+    if (!worker) { bmp.close(); return rej(new Error('no worker')); }
+    const id = ++seq; jobs.set(id, {res, rej});
+    setTimeout(() => { if (jobs.delete(id)) rej(new Error('timeout')); }, 8000);
+    worker.postMessage({id, bmp}, [bmp]);
+  }));
+  return c => (worker ? inWorker(c).catch(() => onMain(c)) : onMain(c)).finally(() => { c.width = c.height = 0; });
+})();
+// Fryser billedet med det samme. Intet her venter på noget.
+function grab() {
   const w = video.videoWidth, h = video.videoHeight;
-  const c = document.createElement('canvas'); c.width = w; c.height = h;
-  c.getContext('2d').drawImage(video, 0, 0, w, h);          // gemmes ikke spejlvendt
-  const t = document.createElement('canvas'); t.width = 48; t.height = Math.max(1, Math.round(48 * h / w));
-  t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
-  const thumb = t.toDataURL('image/jpeg', .6);
-  return new Promise((res, rej) => c.toBlob(b => b ? res({blob: b, w, h, thumb, url: URL.createObjectURL(b), ts: Date.now()}) : rej(new Error('toBlob')), 'image/jpeg', .92));
+  const full = document.createElement('canvas'); full.width = w; full.height = h;
+  full.getContext('2d').drawImage(video, 0, 0, w, h);          // gemmes ikke spejlvendt
+  const k = Math.min(1, 1600 / Math.max(w, h));
+  const view = document.createElement('canvas'); view.width = Math.round(w * k); view.height = Math.round(h * k);
+  view.getContext('2d').drawImage(full, 0, 0, view.width, view.height);   // det, polaroidet viser
+  const s = {w, h, view, ts: Date.now(), blob: encode(full)};
+  s.blob.catch(() => {});
+  return s;
 }
 
 /* ---------- nedtælling og optagelse ---------- */
@@ -471,10 +499,10 @@ async function shoot(n) {
       if (i > 0) { say(i === n - 1 ? 'Sidste!' : 'Én til!', 'again', GAP_MS - 150); await sleep(GAP_MS - 150); if (!alive()) return; }
       say('');
       flash.classList.add('on'); click();
-      got.push(await capture());
+      got.push(grab());
       if (i < n - 1) { await sleep(110); flash.classList.remove('on'); await sleep(40); }
     }
-  } catch (e) { flash.classList.remove('on'); got.forEach(s => URL.revokeObjectURL(s.url)); setState('live'); return; }
+  } catch (e) { flash.classList.remove('on'); setState('live'); return; }
   showReview(got);
   await sleep(160);
   flash.classList.remove('on');
@@ -487,9 +515,9 @@ function sizeFor(a, sw, sh, k) {
 }
 function makeSlot(src, tilt, develop) {
   const slot = document.createElement('div'); slot.className = 'slot';
-  slot.innerHTML = '<figure class="polaroid"><div class="photo"><img alt=""><i class="veil"></i></div><figcaption></figcaption></figure>';
+  slot.innerHTML = '<figure class="polaroid"><div class="photo"><i class="veil"></i></div><figcaption></figcaption></figure>';
   if (develop) slot.firstChild.classList.add('dev');
-  slot.querySelector('img').src = src;
+  slot.querySelector('.photo').prepend(typeof src === 'string' ? Object.assign(new Image(), {src, alt: ''}) : src);
   slot.querySelector('figcaption').textContent = settings.caption;
   slot.style.setProperty('--tilt', tilt + 'deg');
   return slot;
@@ -508,9 +536,8 @@ function showReview(list) {
   const tilts = list.length === 1 ? [(Math.random() < .5 ? -1 : 1) * (2.6 + Math.random() * 1.6)] : [-3.6, 3, -2.4];
   list.forEach((s, i) => {
     s.name = fileName(list[0].ts, list.length > 1 ? i + 1 : 0);
-    s.el = makeSlot(s.url, tilts[i % tilts.length], true); stage.append(s.el);
+    s.el = makeSlot(s.view, tilts[i % tilts.length], true); stage.append(s.el);
   });
-  $('#revBg').style.backgroundImage = 'url(' + list[0].thumb + ')';
   setState('review');
   layoutStack();
 }
@@ -531,7 +558,11 @@ function layoutStack() {
   $('#btnDrop span').textContent = multi ? 'Slet dette' : 'Slet og tag nyt';
   $('#btnKeepAll').hidden = !multi;
   $('#btnKeepAll').textContent = 'Gem alle ' + n;
-  if (shots[cur]) $('#revBg').style.backgroundImage = 'url(' + shots[cur].thumb + ')';
+  if (shots[cur]) paintBg(shots[cur]);
+}
+function paintBg(s) {
+  const b = $('#revBg'); b.width = 48; b.height = Math.max(1, Math.round(48 * s.h / s.w));
+  b.getContext('2d').drawImage(s.view, 0, 0, b.width, b.height);
 }
 function step(d) { if (shots.length < 2) return; cur = (cur + d + shots.length) % shots.length; layoutStack(); armReview(); }
 const pad = n => String(n).padStart(2, '0');
@@ -544,22 +575,29 @@ function download(blob, name) {
   a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
-async function persist(s) {
-  let stored = false;
-  try { await DB.add({blob: s.blob, w: s.w, h: s.h, ts: s.ts, name: s.name}); stored = true; } catch (e) {}
-  if (settings.download || !stored) download(s.blob, s.name);   // uden lager er Overførsler eneste kopi
+// Gemmer i baggrunden, ét billede ad gangen. Skærmen venter ikke.
+let saveChain = Promise.resolve();
+function persist(s) {
+  saveChain = saveChain.then(async () => {
+    let blob;
+    try { blob = await s.blob; } catch (e) { toast('Billedet kunne ikke gemmes', false); return; }
+    let stored = false;
+    try { await DB.add({blob, w: s.w, h: s.h, ts: s.ts, name: s.name}); stored = true; } catch (e) {}
+    if (settings.download || !stored) { download(blob, s.name); await sleep(250); }   // uden lager er Overførsler eneste kopi
+  });
+  return saveChain;
 }
 function leave(s, cls) {
   s.el.classList.add(cls);
-  const el = s.el, url = s.url;
-  setTimeout(() => { el.remove(); URL.revokeObjectURL(url); }, 520);
+  const el = s.el, view = s.view;
+  setTimeout(() => { el.remove(); view.width = view.height = 0; }, 520);
 }
 async function resolve(keep, all) {
   if (state !== 'review' || busy || !shots.length) return;
   busy = true; goFull();
   const targets = all ? shots.slice() : [shots[cur]];
   for (const s of targets) {
-    if (keep) await persist(s);
+    if (keep) persist(s);
     leave(s, keep ? 'out-up' : 'out-down');
     if (all && keep) await sleep(260);
   }
@@ -577,8 +615,8 @@ function discardAll() {
   setTimeout(() => { if (state === 'review') setState('live'); }, 400);
 }
 let toastT = 0;
-function toast(text) {
-  const t = $('#toast'); t.querySelector('span').textContent = text; t.classList.add('on');
+function toast(text, ok) {
+  const t = $('#toast'); t.querySelector('span').textContent = text; t.classList.toggle('bad', ok === false); t.classList.add('on');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 1500);
 }
 
@@ -731,6 +769,7 @@ addEventListener('contextmenu', e => { if (!e.target.closest('.sheet')) e.preven
 
 /* ---------- betjening ---------- */
 $('#startCaption').textContent = settings.caption;
+$('#ver').textContent = 'v' + VERSION;
 $('#btnStart').addEventListener('click', () => boot(false));
 $('#btnRetry').addEventListener('click', () => boot(false));
 $('#btnDemo').addEventListener('click', () => boot(true));
