@@ -29,6 +29,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import org.json.JSONArray;
+
 import java.io.ByteArrayInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -223,6 +225,28 @@ public class MainActivity extends Activity {
                 final String js = "window.__gbSaved&&window.__gbSaved(" + id + "," + ok + ")";
                 runOnUiThread(() -> web.evaluateJavascript(js, null));
             });
+        }
+
+        /**
+         * Navnene på de GladBooth-billeder, der stadig findes på telefonen, som JSON-liste.
+         * Uden tilladelse til at læse andres billeder ser appen kun dem, den selv har lavet.
+         * Tom streng betyder, at telefonen ikke kunne svare, og så må siden ikke rydde op.
+         */
+        @JavascriptInterface
+        public String listPhotos() {
+            try {
+                JSONArray names = new JSONArray();
+                Uri images = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                try (Cursor c = getContentResolver().query(images, new String[]{MediaStore.Images.Media.DISPLAY_NAME},
+                        MediaStore.Images.Media.DISPLAY_NAME + " LIKE ?", new String[]{"GladBooth-%"}, null)) {
+                    if (c == null) return "";
+                    while (c.moveToNext()) names.put(c.getString(0));
+                }
+                return names.toString();
+            } catch (Throwable t) {
+                Log.e(TAG, "Kunne ikke slå billederne op", t);
+                return "";
+            }
         }
 
         @JavascriptInterface
