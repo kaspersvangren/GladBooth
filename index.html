@@ -83,7 +83,6 @@ button{font:inherit}
 .slot.back{filter:brightness(.7)}
 .slot.out-up{transform:translate(-50%,-50%) translate(0,-120vh) rotate(-14deg);opacity:0}
 .slot.out-down{transform:translate(-50%,-50%) translate(0,75vh) rotate(16deg) scale(.85);opacity:0}
-.slot.fade{opacity:0;transform:translate(-50%,-50%) translate(0,4vh) rotate(var(--tilt,0deg)) scale(.96);transition-duration:.9s}
 .polaroid{margin:0;padding:calc(var(--u)*.06) calc(var(--u)*.06) 0;border-radius:calc(var(--u)*.012);
   background:linear-gradient(172deg,#fffefb 0%,#f8f4ea 70%,#f1ecdf 100%);
   box-shadow:0 1px 0 rgba(255,255,255,.7) inset,0 calc(var(--u)*.008) calc(var(--u)*.02) rgba(0,0,0,.35),
@@ -137,8 +136,21 @@ button{font:inherit}
 /* ---------- hvile ---------- */
 #idle,#start,#error{background:radial-gradient(120% 95% at 50% 28%,var(--pine-lit) 0%,var(--pine) 55%,var(--pine-deep) 100%)}
 .snow{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-#idleStage{position:absolute;inset:4% 0 17% 0}
-#idle .hint{position:absolute;left:0;right:0;bottom:calc(5% + env(safe-area-inset-bottom));margin:0;text-align:center;
+#idle{overflow:hidden}
+#sky,#skyNear{position:absolute;inset:0;overflow:hidden;pointer-events:none;opacity:0;transition:opacity 1.4s ease}
+#sky.filled,#skyNear.filled{opacity:1}
+#sky{z-index:1}#idleStage{position:absolute;inset:4% 0 17% 0;z-index:2}#skyNear{z-index:3}
+/* polaroider i luften: kort med for- og bagside, der roterer i 3D */
+.fall,.hero{position:absolute;left:0;top:0;transform-style:preserve-3d;will-change:transform}
+.hero{left:50%;top:50%}
+.fall .polaroid,.hero .polaroid{animation:none;-webkit-backface-visibility:hidden;backface-visibility:hidden}
+.fall .polaroid{box-shadow:0 0 0 1px rgba(0,0,0,.1)}
+.backside{position:absolute;inset:0;border-radius:calc(var(--u)*.012);background:linear-gradient(172deg,#f1ede2,#e2dccb);
+  transform:rotateY(180deg);-webkit-backface-visibility:hidden;backface-visibility:hidden}
+.backside::after{content:"";position:absolute;inset:calc(var(--u)*.06) calc(var(--u)*.06) calc(var(--u)*.24);background:linear-gradient(160deg,#343836,#1c1f1e)}
+.fall.far .polaroid,.fall.far .backside{filter:brightness(.46) blur(1.2px)}
+.fall.mid .polaroid,.fall.mid .backside{filter:brightness(.72)}
+#idle .hint{position:absolute;z-index:4;left:0;right:0;bottom:calc(5% + env(safe-area-inset-bottom));margin:0;text-align:center;
   font-size:clamp(20px,6.2vmin,44px);text-shadow:0 .08em 0 var(--berry-deep),0 .2em .4em rgba(0,0,0,.45);
   animation:breathe 2.6s ease-in-out infinite}
 @keyframes breathe{0%,100%{opacity:.72}50%{opacity:1}}
@@ -245,8 +257,9 @@ input:focus-visible,.mb:focus-visible,.seg button:focus-visible{outline:3px soli
 </div>
 
 <div id="idle" class="layer">
-  <canvas class="snow"></canvas>
+  <div id="sky"></div>
   <div id="idleStage"></div>
+  <div id="skyNear"></div>
   <p class="hint">Tryk for at tage et billede</p>
 </div>
 
@@ -293,16 +306,18 @@ input:focus-visible,.mb:focus-visible,.seg button:focus-visible{outline:3px soli
 <script>
 (() => {
 'use strict';
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const NATIVE = window.GladBooth || null;   // sat af Android-appen; i en browser er den tom
 if (NATIVE) document.documentElement.classList.add('native');
 const IDLE_MS = 30000;      // stilstand før diasshowet starter
 const REVIEW_MS = 60000;    // et billede, ingen har taget stilling til, kasseres
-const SLIDE_MS = 6000;
+const SLIDE_MS = 7000;      // så længe ligger hvert billede i midten
 const GAP_MS = 1500;        // mellem billederne i en sekvens
 
 const $ = s => document.querySelector(s);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const rand = (a, b) => a + Math.random() * (b - a);
+const CALM = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const video = $('#cam'), flash = $('#flash'), sayBox = $('#say'), stage = $('#stage'), idleStage = $('#idleStage');
 const LAYERS = ['start', 'live', 'count', 'review', 'idle', 'error'];
 
@@ -348,6 +363,7 @@ function setState(s) {
   document.body.dataset.state = s;
   for (const l of LAYERS) $('#' + l).classList.toggle('on', l === s);
   clearTimeout(idleT); clearTimeout(revT); clearInterval(slideT);
+  if (s !== 'idle') stopSky();
   snow.sync();
   if (s === 'live') armIdle();
   if (s === 'review') armReview();
@@ -714,37 +730,150 @@ function toast(text, ok) {
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 1500);
 }
 
-/* ---------- hvile: diasshow af gemte billeder ---------- */
-let idleKeys = [], idleI = 0;
+/* ---------- hvile: det sner med polaroider ----------
+   Gemte billeder falder som sne i tre lag (fjernt, mellem, tæt på), og ét billede ad gangen
+   tumler ned og lander i midten. Al bevægelse er transform-animationer, som telefonens
+   grafikchip kører selv, så det ikke hakker, når resten af appen arbejder. */
+const sky = $('#sky'), skyNear = $('#skyNear');
+const DEPTHS = [
+  {cls: 'far',  n: 6, w: [.13, .19], dur: [15, 22],    host: sky,     x: () => rand(.02, .98)},
+  {cls: 'mid',  n: 5, w: [.25, .34], dur: [9.5, 13.5], host: sky,     x: () => rand(.03, .97)},
+  {cls: 'near', n: 3, w: [.50, .66], dur: [5.5, 8],    host: skyNear, x: () => Math.random() < .5 ? rand(-.06, .1) : rand(.9, 1.06)},   // kun i siderne
+];
+let idleKeys = [], idleI = 0, idleRun = 0, fallers = [], thumbList = [], thumbI = 0;
+const thumbCache = new Map();   // id -> {url, a}: små udgaver til de faldende kort
+function dropThumbs() { thumbCache.forEach(t => URL.revokeObjectURL(t.url)); thumbCache.clear(); thumbList = []; }
+
+function makeCard(src, cls) {
+  const el = document.createElement('div'); el.className = cls;
+  el.innerHTML = '<figure class="polaroid"><div class="photo"></div><figcaption></figcaption></figure><div class="backside"></div>';
+  el.querySelector('.photo').append(Object.assign(new Image(), {alt: '', src}));
+  el.querySelector('figcaption').textContent = settings.caption;
+  return el;
+}
+// Sætter kortets mål ud fra den samlede bredde; giver højden tilbage
+function sizeCard(el, a, W) {
+  const u = a >= 1 ? W / (a + .12) : W / 1.12;
+  sizeSlot(el, a >= 1 ? {u, pw: u * a, ph: u} : {u, pw: u, ph: u / a});
+  return a >= 1 ? u * 1.30 : u / a + u * .30;
+}
+async function thumbFor(id) {
+  if (thumbCache.has(id)) return thumbCache.get(id);
+  const rec = await DB.get(id); if (!rec) return null;
+  const a = rec.w / rec.h; let url;
+  try {
+    const bmp = await createImageBitmap(rec.blob, a >= 1 ? {resizeWidth: 420, resizeQuality: 'medium'} : {resizeHeight: 420, resizeQuality: 'medium'});
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+    c.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
+    url = URL.createObjectURL(await encode(c));
+  } catch (e) { url = URL.createObjectURL(rec.blob); }
+  const t = {url, a}; thumbCache.set(id, t); return t;
+}
+// Ét fald fra over skærmen til under den, med sin egen fart, drift og rotation om alle tre akser
+function launch(c, first) {
+  if (state !== 'idle' || !thumbList.length) return;
+  if (c.anim) { c.anim.onfinish = null; c.anim.cancel(); }
+  const L = c.L, vw = innerWidth, vh = innerHeight, vmin = Math.min(vw, vh);
+  const t = thumbList[thumbI++ % thumbList.length];
+  const img = c.el.querySelector('img'); if (c.url !== t.url) { img.src = t.url; c.url = t.url; }
+  const W = rand(L.w[0], L.w[1]) * vmin, H = sizeCard(c.el, t.a, W), diag = Math.hypot(W, H);
+  const x0 = L.x() * vw - W / 2, drift = rand(-.07, .07) * vw, amp = rand(.01, .035) * vw, ph = rand(0, 6.28), waves = rand(1, 2.2);
+  const y0 = -diag, y1 = vh + (diag - H) / 2 + 4, sgn = () => Math.random() < .5 ? -1 : 1;
+  const r0 = [rand(0, 360), rand(0, 360), rand(-40, 40)];
+  const dr = [sgn() * rand(1.2, 3) * 360, sgn() * rand(.5, 1.6) * 360, sgn() * rand(.15, .6) * 360];
+  const P = Math.round(W * 3.2), N = 10, frames = [];
+  for (let k = 0; k <= N; k++) {
+    const f = k / N, x = x0 + drift * f + Math.sin(ph + f * waves * 6.283) * amp, y = y0 + (y1 - y0) * f;
+    frames.push({transform: `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) perspective(${P}px) rotateX(${(r0[0] + dr[0] * f).toFixed(1)}deg) rotateY(${(r0[1] + dr[1] * f).toFixed(1)}deg) rotateZ(${(r0[2] + dr[2] * f).toFixed(1)}deg)`});
+  }
+  const duration = rand(L.dur[0], L.dur[1]) * 1000;
+  c.anim = c.el.animate(frames, {duration, easing: 'linear', fill: 'both'});
+  if (first) c.anim.currentTime = Math.random() * duration;   // ved start er himlen allerede fuld
+  c.anim.onfinish = () => launch(c, false);
+}
+function spawnSky() {
+  for (const L of DEPTHS) for (let i = 0; i < L.n; i++) {
+    const c = {L, el: makeCard(thumbList[0].url, 'fall ' + L.cls), url: thumbList[0].url, anim: null};
+    L.host.append(c.el); fallers.push(c); launch(c, true);
+  }
+  requestAnimationFrame(() => { sky.classList.add('filled'); skyNear.classList.add('filled'); });
+}
+function stopSky() {
+  idleRun++;
+  for (const c of fallers) if (c.anim) { c.anim.onfinish = null; c.anim.cancel(); }
+  fallers = [];
+  sky.replaceChildren(); skyNear.replaceChildren();
+  sky.classList.remove('filled'); skyNear.classList.remove('filled');
+  idleStage.querySelectorAll('.hero').forEach(h => { h.getAnimations().forEach(a => { a.onfinish = null; a.cancel(); }); URL.revokeObjectURL(h.dataset.url); });
+  idleStage.replaceChildren();
+}
 async function enterIdle() {
   if (state !== 'live' || menuOpen) return;
   let keys = [];
   try { keys = await DB.keys(); } catch (e) {}
   if (!keys.length || state !== 'live') { armIdle(); return; }
   idleKeys = keys.reverse(); idleI = 0;
-  idleStage.replaceChildren();
+  stopSky();
+  const run = idleRun;
   setState('idle');
-  nextSlide();
-  slideT = setInterval(nextSlide, SLIDE_MS);
+  nextHero(run);
+  slideT = setInterval(() => nextHero(run), SLIDE_MS);
+  if (CALM) return;
+  // De seks nyeste og seks tilfældige ældre kommer på de faldende kort
+  if (thumbCache.size > 40) dropThumbs();
+  const ids = idleKeys.slice(0, 6), rest = idleKeys.slice(6);
+  while (ids.length < 12 && rest.length) ids.push(rest.splice(Math.floor(Math.random() * rest.length), 1)[0]);
+  thumbList = [];
+  for (const id of ids) {
+    let t = null;
+    try { t = await thumbFor(id); } catch (e) {}
+    if (run !== idleRun || state !== 'idle') return;
+    if (t) thumbList.push(t);
+  }
+  thumbList.sort(() => Math.random() - .5);
+  if (thumbList.length) spawnSky();
 }
-async function nextSlide() {
+// Billedet i midten: det gamle tipper forover og falder ud, det nye tumler ned og lander
+async function nextHero(run) {
   const id = idleKeys[idleI++ % idleKeys.length];
   let rec; try { rec = await DB.get(id); } catch (e) {}
-  if (!rec || state !== 'idle') return;
-  const url = URL.createObjectURL(rec.blob), r = idleStage.getBoundingClientRect();
-  const slot = makeSlot(url, (idleI % 2 ? -1 : 1) * (2.2 + Math.random() * 2), false);
-  slot.dataset.url = url; slot.dataset.a = rec.w / rec.h;
-  sizeSlot(slot, sizeFor(rec.w / rec.h, r.width, r.height, .84));
-  idleStage.querySelectorAll('.slot').forEach(old => {
-    old.classList.add('fade');
-    setTimeout(() => { old.remove(); URL.revokeObjectURL(old.dataset.url); }, 950);
-  });
-  idleStage.append(slot);
+  if (!rec || run !== idleRun || state !== 'idle') return;
+  const url = URL.createObjectURL(rec.blob), el = makeCard(url, 'hero');
+  el.dataset.url = url;
+  const r = idleStage.getBoundingClientRect();
+  sizeSlot(el, sizeFor(rec.w / rec.h, r.width, r.height, .74));
+  try { await el.querySelector('img').decode(); } catch (e) {}
+  if (run !== idleRun || state !== 'idle') { URL.revokeObjectURL(url); return; }
+  const vh = innerHeight, tilt = (idleI % 2 ? -1 : 1) * rand(2, 4.2), sx = Math.random() < .5 ? -1 : 1;
+  const T = (y, rx, ry, rz) => `translate(-50%,-50%) translate3d(0,${y.toFixed(1)}px,0) perspective(1400px) rotateX(${rx}deg) rotateY(${ry}deg) rotateZ(${rz.toFixed(2)}deg)`;
+  const old = idleStage.querySelector('.hero:not(.leaving)');
+  if (old) {
+    old.classList.add('leaving');
+    const ot = +old.dataset.tilt;
+    const out = old.animate(CALM ? [{opacity: 1}, {opacity: 0}] : [
+      {transform: T(0, 0, 0, ot)},
+      {transform: T(vh * .06, 38 * sx, -10, ot + 5), offset: .28},
+      {transform: T(vh * 1.3, 230 * sx, -60, ot + 40)}],
+      {duration: CALM ? 600 : 1500, easing: CALM ? 'ease' : 'cubic-bezier(.5,0,.9,.55)', fill: 'forwards'});
+    out.onfinish = () => { old.remove(); URL.revokeObjectURL(old.dataset.url); };
+  }
+  el.dataset.tilt = tilt;
+  idleStage.append(el);
+  el.animate(CALM ? [{opacity: 0, transform: T(0, 0, 0, tilt)}, {opacity: 1, transform: T(0, 0, 0, tilt)}] : [
+    {transform: T(-vh * 1.2, -300 * sx, 80, tilt - 50), easing: 'linear'},
+    {transform: T(-vh * .16, -48 * sx, 13, tilt - 8), offset: .7, easing: 'cubic-bezier(.2,.6,.35,1)'},
+    {transform: T(vh * .014, 7 * sx, -2, tilt + 1.4), offset: .9, easing: 'ease-in-out'},
+    {transform: T(0, 0, 0, tilt)}],
+    {duration: CALM ? 600 : 2000, delay: old && !CALM ? 450 : 0, easing: CALM ? 'ease' : 'linear', fill: 'both'});
+}
+let resizeT = 0;
+function restartIdle() {   // skærmen er drejet: byg scenen op igen i de nye mål
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => { if (state === 'idle') { state = 'live'; enterIdle(); } }, 250);
 }
 
 /* ---------- sne ---------- */
 const snow = (() => {
-  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let raf = 0, cv = null, flakes = [];
   const tick = () => {
     const c = cv, x = c.getContext('2d'), w = c.width, h = c.height;
@@ -758,8 +887,8 @@ const snow = (() => {
   };
   return {sync() {
     cancelAnimationFrame(raf); raf = 0;
-    const host = state === 'start' || state === 'idle' ? $('#' + state + ' .snow') : null;
-    if (!host || calm) return;
+    const host = state === 'start' ? $('#start .snow') : null;
+    if (!host || CALM) return;
     cv = host;
     const d = Math.min(2, devicePixelRatio || 1); cv.width = innerWidth * d; cv.height = innerHeight * d;
     flakes = Array.from({length: 46}, () => ({x: Math.random() * cv.width, y: Math.random() * cv.height,
@@ -814,6 +943,7 @@ $('#mClear').addEventListener('click', async e => {
   if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Tryk igen (galleriet røres ikke)'; return; }
   // Billeder, der venter på at blive til filer, bliver liggende
   try { const keep = pending.list(); for (const id of await DB.keys()) if (!keep.includes(id)) await DB.del(id); } catch (err) {}
+  dropThumbs();
   refreshMenu();
 });
 $('#mFull').addEventListener('click', goFull);
@@ -864,7 +994,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('resize', () => {
   if (state === 'review') layoutStack();
-  if (state === 'idle') { const r = idleStage.getBoundingClientRect(); idleStage.querySelectorAll('.slot:not(.fade)').forEach(s => sizeSlot(s, sizeFor(+s.dataset.a, r.width, r.height, .84))); }
+  if (state === 'idle') restartIdle();
   snow.sync();
 });
 document.addEventListener('visibilitychange', () => {
